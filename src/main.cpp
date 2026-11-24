@@ -9,10 +9,21 @@ constexpr int TC_CS_PIN = 4;
 constexpr int TC_DO_PIN = 2;
 const int minThreshold = 5;    // gnd
 const int maxThreshold = 1018; // vcc
+const float V_MIN = 0.33f;          // Voltage at minimum pressure (V)
+const float V_MAX = 2.97f;          // Voltage at maximum pressure (V)
+const float P_MIN_PA = 0.0f;        // Minimum pressure in Pascals
+const float P_MAX_PA = 1000000.0f;  // Maximum pressure in Pascals (10 bar = 1,00
 const int initializedCounterMax = 5;
+const int countOfStampsForConfirmation = 2;
 unsigned long lastAttempt = 0;
+unsigned long timePast = 0;
+unsigned long timePastCombustion = 0;
+unsigned long timeSinceIngnition = 0;
 char incomingByte;
 bool abortActivated = false;
+bool thrustIsActive = true;
+bool pressureGrowth = false;
+bool combustionPressureGrwoth = false;
 int initiliazedCounter = 0;
 
 #define TXD1 19
@@ -63,9 +74,11 @@ enum BatteryStatus {
 struct telemetryData 
   {
     float pressureRaw;
+    float pressureVoltage;
     float pressure;
     float thrust;
     float combustionPressureRaw;
+    float combustionPressureVoltage;
     float combustionPressure;
     float batteryVoltage;
     uint32_t rawVoltage;
@@ -77,15 +90,15 @@ telemetryData currentData;
 FlightState currentState = STATE_IDLE;
 CommunicationStatus currentStatus = COMMUNICATION_PENDING;
 
-
-// prejst si tu spravne prepocty
 telemetryData sendTelemetry()
 {
   currentData.pressureRaw = analogRead(20);
-  currentData.pressure = (currentData.pressureRaw/4095.0) * 25.0;
-  currentData.thrust = scale.get_units(4);
+  currentData.pressureVoltage = (currentData.pressureRaw / 4095.0f) * 1000.0f;
+  currentData.pressure = ((currentData.pressureVoltage - V_MIN) / (V_MAX - V_MIN)) * (P_MAX_PA - P_MIN_PA) + P_MIN_PA;
+  if (thrustIsActive != false) currentData.thrust = scale.get_units(4);
   currentData.combustionPressureRaw = analogRead(21);
-  currentData.combustionPressure = (currentData.combustionPressureRaw/4095.0) * 25.0;
+  currentData.combustionPressureVoltage = (currentData.combustionPressureRaw / 4095.0f) * 1000.0f;
+  currentData.combustionPressure = ((currentData.combustionPressureVoltage - V_MIN) / (V_MAX - V_MIN)) * (P_MAX_PA - P_MIN_PA) + P_MIN_PA;
   currentData.rawVoltage = analogReadMilliVolts(PIN_BATTERY);
   currentData.batteryVoltage = (currentData.rawVoltage / 1000.0) * 1.27;
   currentData.batteryPercentage  = (currentData.batteryVoltage - 3.0) / (4.2 - 3.0) * 100.0;
@@ -188,6 +201,7 @@ FlightState checkInitialization()
 {
   if (initiliazedCounter >= initializedCounterMax)
   {
+    currentState = STATE_ARMED;
     return STATE_ARMED;
   }
 
@@ -249,7 +263,7 @@ void setup() {
   );
 }
 
-void loopCritical(void * pvParameters) { // burn and stop check
+void loopCritical(void * pvParameters) {
   for (;;) {
     button_state = digitalRead(START_PIN);
     button_state1 = digitalRead(STOP_PIN);
@@ -263,28 +277,56 @@ void loopCritical(void * pvParameters) { // burn and stop check
     }
 
     currentData = sendTelemetry();
+    if (millis() >= 50 && currentData.thrust <= 0)
+    {
+      thrustIsActive = false;
+    }
 
-    // neviem ci tu dobre volam millis, pozriet..
     if (currentData.combustionPressure >= 11)
     {
-      if (millis() >= 30 && currentData.combustionPressure >= 12.2) 
+      if (!combustionPressureGrwoth)
+      {
+        timePastCombustion = millis();
+        combustionPressureGrwoth = true;
+      }
+
+      if (millis() - timePastCombustion >= 30 && currentData.combustionPressure >= 12.2)
+      { 
+        stop();
+        combustionPressureGrwoth = false;
+      }
+    }
+    else combustionPressureGrwoth = false;
+
+    if (currentData.pressure >= 2.4)
+    {
+      if (!pressureGrowth)
+      {
+        timePast = millis();
+        pressureGrowth = true;
+      }
+
+      if (millis() - timePast >= 30 && currentData.pressure >= 2.4)
       {
         stop();
-        lastAttempt = 0;
+        pressureGrowth = false;
       }
     }
 
-    // pozriet tlak v potrubii to iste s expo. rastom, tlak v potrubii a ostatne az po mojich vypoctoch :)
-
     incomingByte = Serial1.read();
-    if (incomingByte != 'O')
+    if (incomingByte != 'O' || incomingByte != -1)
     {
       if (millis() - lastAttempt >= 500) 
       {
         lastAttempt = millis();
         stop();
-        lastAttempt = 0;
       }
+    }
+
+    timeSinceIngnition = millis();
+    if (millis() - timeSinceIngnition == 30000)
+    {
+      stop();
     }
 
     vTaskDelay(5 / portTICK_PERIOD_MS); 
@@ -305,18 +347,15 @@ void loop() {
     currentState = STATE_ABORT;
   }
 
-  incomingByte = Serial1.read();
-  if (incomingByte != 'O')
+  if (incomingByte != 'O' || incomingByte != -1)
   {
     if (millis() - lastAttempt >= 500) 
     {
       lastAttempt = millis();
       currentStatus = COMMUNICATION_LOST;
     }
-
-    lastAttempt = 0;
   }
-  else CommunicationStatus currentStatus = COMMUNICATION_ESTABLISHED;
+  else currentStatus = COMMUNICATION_ESTABLISHED;
 
   vTaskDelay(10 / portTICK_PERIOD_MS);
 }

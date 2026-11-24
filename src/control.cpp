@@ -2,11 +2,12 @@
 #define TXD1 19
 #define RXD1 21
 
-#define START_PIN  18
-#define STOP_PIN  19
+#define START_PIN  32
+#define STOP_PIN  33
 
 int button_state = 0;
-int button_state1 = 0; 
+int button_state1 = 0;
+unsigned long timePing = 0;
 
 enum CommunicationStatusControl {
     COMMUNICATION_LOST_CONTROL,
@@ -56,5 +57,9 @@ void setup()
 
 void loop()
 {
+  if (millis() - timePing == 100)
+  {
     Serial.println('O');
+  }
+  timePing = millis();
 }
